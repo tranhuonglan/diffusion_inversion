@@ -16,8 +16,6 @@ from medmnist import INFO
 
 import ml_collections
 import tensorflow as tf
-tf.config.experimental.set_visible_devices([], "GPU")
-
 PIL_INTERPOLATION = {
     "linear": PIL.Image.Resampling.BILINEAR,
     "bilinear": PIL.Image.Resampling.BILINEAR,
@@ -41,12 +39,13 @@ def load_pipe(model_id, emb, emb_ckpt, avg_uncond_embeddings=False, dtype=torch.
         torch_dtype=dtype,
         avg_uncond_embeddings=avg_uncond_embeddings
     )
+    print("self.schedule", new_pipe.scheduler)
     return new_pipe
 
-def interpolation_sample(dataset_name, model_root_dir, outdir='inversion_data/cifar10', dm_name="CompVis/stable-diffusion-v1-4",
-                         group_id=0, emb_ch=768, num_emb=1000, num_tokens=5, num_classes=10, emb_noise=0.0, interpolation_strength=0.1, num_samples=5,
+def interpolation_sample(dataset_name='cifar10', model_root_dir='results/logs/cifar10/res128_bicubic/emb100_token5_lr0.03_constant', outdir='inversion_data/cifar10', dm_name="CompVis/stable-diffusion-v1-4",
+                         group_id=0, emb_ch=768, num_emb=100, num_tokens=5, num_classes=10, emb_noise=0.0, interpolation_strength=0.1, num_samples=5,
                         sampling_resolution=128, interpolation='bicubic', save_resolution=32, num_inference_steps=200, train_steps=2000, guidance_scale=2.0,
-                        batch_size=100, seed=0):
+                        batch_size=100, seed=0, t_step=-1):
 
     root_name = f'{outdir}/res{save_resolution}_{interpolation}'
     
@@ -138,13 +137,13 @@ def interpolation_sample(dataset_name, model_root_dir, outdir='inversion_data/ci
             
             num_batches = len(prompt)//batch_size if len(prompt) % batch_size == 0 else len(prompt)//batch_size+1
             print(f'>> Number of batches: {num_batches}. Number of data: {len(prompt)}.')
-            
+            print('TSTEP', t_step)
             for i in range(num_batches):
                 p = np.array(prompt[i*batch_size:(i+1)*batch_size])
                 name = name_list[i*batch_size:(i+1)*batch_size]
                 images = pipe(p, height=sampling_resolution, width=sampling_resolution,
                             num_inference_steps=num_inference_steps, generator=g_cuda, emb_noise=emb_noise,
-                            guidance_scale=guidance_scale, eta=1.).images
+                            guidance_scale=guidance_scale, eta=1., t_step=t_step).images
                 
                 for idx, img in enumerate(images):
                     img = img.resize((save_resolution, save_resolution),
@@ -177,24 +176,25 @@ def interpolation_sample(dataset_name, model_root_dir, outdir='inversion_data/ci
             else:
                 out_class_candidates = [j for j in all_ids if j not in cls_mapping[lb]]
                 sample_idx = in_class_candidates + np.random.choice(
-                    out_class_candidates, size=num_samples-len(in_class_candidates), replace=False).tolist()
+                out_class_candidates, size=num_samples-len(in_class_candidates), replace=False).tolist()
+            
+            ###Debug 
             for idx in sample_idx:
                 label_list.append(lb)
                 prompt.append(np.eye(num_emb)[
                             i] + interpolation_strength * (np.eye(num_emb)[idx] - np.eye(num_emb)[i]))
                 name_list.append(
                     f'sample{group_id*num_emb + i:07d}_{group_id*num_emb + idx:07d}')
-        
         num_batches = len(prompt)//batch_size if len(prompt) % batch_size == 0 else len(prompt)//batch_size+1
         print(f'>> Number of batches: {num_batches}. Number of data: {len(prompt)}.')
-        
+        print('>> Add Loss at Step:', t_step)
         for i in tqdm(range(num_batches)):
             p = np.array(prompt[i*batch_size:(i+1)*batch_size])
             lb = label_list[i*batch_size:(i+1)*batch_size]
             name = name_list[i*batch_size:(i+1)*batch_size]
             images = pipe(p, height=sampling_resolution, width=sampling_resolution,
                         num_inference_steps=num_inference_steps, generator=g_cuda, emb_noise=emb_noise,
-                        guidance_scale=guidance_scale, eta=1.).images
+                        guidance_scale=guidance_scale, eta=1., t_step=t_step, label=lb).images
             
             for idx, img in enumerate(images):
                 img = img.resize((save_resolution, save_resolution),
@@ -204,5 +204,7 @@ def interpolation_sample(dataset_name, model_root_dir, outdir='inversion_data/ci
     
             
 if __name__ == "__main__":
+    CUDA_VISIBLE_DEVICES=4
+    torch.cuda.empty_cache()
     fire.Fire(interpolation_sample)
    

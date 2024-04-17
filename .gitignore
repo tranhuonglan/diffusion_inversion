@@ -33,3 +33,7 @@ MANIFEST
 src/wandb/
 
 checkpoint/
+results/
+arch/
+data/
+wandb/

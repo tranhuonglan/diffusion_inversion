@@ -34,7 +34,7 @@ from datasets import load_dataset
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from dataset import get_dataset  # NOQA
 from models import ResNet18, ResNet50, VGG, MobileNetV2, EfficientNetB0, ShuffleNetV2  # NOQA
-
+from sklearn.metrics import confusion_matrix
 
 PIL_INTERPOLATION = {
     "linear": PIL.Image.Resampling.BILINEAR,
@@ -106,9 +106,6 @@ parser.add_argument('--syn-data-dir', default='', type=str, metavar='DIR',
                     help='path to synthetic dataset (root dir)')
 parser.add_argument('--syn-pattern', default='', type=str, metavar='NAME',
                     help='regular expression for the wanted synthetic dataset')
-parser.add_argument('--specific-class', default=None, type=list, metavar='NAME',
-                    help='regular expression for the wanted synthetic dataset')
-
 parser.add_argument('--output', default='', type=str, metavar='PATH',
                     help='path to output folder (default: none, current dir)')
 parser.add_argument('--model', default='resnet18', type=str, metavar='NAME',
@@ -179,11 +176,8 @@ def test(net, testloader, criterion, device):
     return test_loss/total, 100.*correct/total
 
 
-def split_tiny_imagenet(ds, selected_class):
-    class_to_new_label = {old_label: new_label for new_label, old_label in enumerate(selected_class)}
-    print('>>>>> Map class to new label', class_to_new_label)
+def split_tiny_imagenet(ds, selected_class, class_to_new_label):
     ds = ds.filter(lambda x: x['label'] in selected_class)
-
     def map_labels(sample):
         sample['label'] = class_to_new_label[sample['label']]
         return sample
@@ -195,8 +189,7 @@ def main():
     args = parser.parse_args()
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print('>>>> Detect Device', device)
-    if device == 'cuda':
-        cudnn.benchmark = True
+    print(torch.backends.cudnn.enabled)
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -207,13 +200,7 @@ def main():
         name=args.dataset_name,
         data_dir='~/tensorflow_datasets')
 
-    if args.dataset_name in ["pathmnist", "bloodmnist", "dermamnist"]:
-        resolution = 28
-    elif args.dataset_name in ['cifar10', 'cifar100']:
-        resolution = 32
-    elif args.dataset_name in ['stl10']:
-        resolution = 96
-    elif args.dataset_name in ['imagenette', 'imagenet']:
+    if args.dataset_name in ['imagenette', 'imagenet']:
         resolution = 256
     elif args.dataset_name in ['tiny-imagenet']:
         resolution = 64
@@ -232,6 +219,14 @@ def main():
         transforms.Normalize(mean, std),
     ])
 
+    transform_synthesize = transforms.Compose([
+        transforms.Lambda(lambda img: img.convert('RGB')),
+        transforms.Resize(
+            resolution, interpolation=InterpolationMode.BICUBIC, antialias=True),
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+    ])
+
     transform_test = transforms.Compose([
         transforms.Lambda(lambda img: img.convert('RGB')),
         transforms.Resize(
@@ -240,43 +235,13 @@ def main():
         transforms.ToTensor(),
         transforms.Normalize(mean, std),
     ])
-    if args.dataset_name in ["pathmnist", "bloodmnist", "dermamnist"]:
-        info = INFO[args.dataset_name]
-        num_classes = len(info['label'])
-        DataClass = getattr(medmnist, info['python_class'])
-        train_ds = DataClass(split='train', transform=None, download=True)
-        test_ds = DataClass(split='test', transform=None, download=True)
-        x_train, y_train = train_ds.imgs, train_ds.labels
-        x_test, y_test = test_ds.imgs, test_ds.labels
-        y_train, y_test = y_train.squeeze(), y_test.squeeze()
 
-        # Subset of data
-        group_size = args.group_size
-        cls_idx = {}
-        for i in range(num_classes):
-            cls_idx[i] = np.where(y_train == i)[0][0:group_size]
-
-        x_t = np.concatenate([x_train[idx]
-                              for k, idx in cls_idx.items()], axis=0)
-        y_t = np.concatenate([y_train[idx]
-                              for k, idx in cls_idx.items()], axis=0)
-
-        real_train = RealDataset(x_t, y_t, transform=transform_train)
-        real_test = RealDataset(x_test, y_test, transform=transform_test)
-        real_loader = torch.utils.data.DataLoader(
-            real_train, batch_size=args.real_bs, shuffle=True, num_workers=4, pin_memory=True)
-        real_testloader = torch.utils.data.DataLoader(
-            real_test, batch_size=100, shuffle=False, num_workers=4)
-        print(f'Train Dataset size {len(real_train)}')
-        print(f'Test Dataset size {len(real_test)}')
-        print(f'==> Real Training data loaded.. Size: {len(real_train)}')
-
-    elif args.dataset_name == 'imagenet':
+    if args.dataset_name == 'imagenet':
         imagenet_path_train = '/scratch/ssd002/datasets/imagenet/train'
         num_classes=1000
         class_map = {i: [] for i in range(num_classes)}
         train_dataset = ImageFolder(imagenet_path_train, transform=transform_train)
-        
+       
         for i, y in enumerate(train_dataset.targets):
             class_map[y].append(i)
         print({i: len(class_map[i]) for i in range(num_classes)})
@@ -299,68 +264,49 @@ def main():
         from classes import i2d
         ds_train = load_dataset('Maysee/tiny-imagenet', split='train')
         ds_test = load_dataset('Maysee/tiny-imagenet', split='valid')
-        real_train = TinyImagenet(split_tiny_imagenet(ds_train, subset_tiny_img), transform=transform_train)
-        real_test = TinyImagenet(split_tiny_imagenet(ds_test, subset_tiny_img), transform=transform_test)
+        subset_tiny_img = sorted(subset_tiny_img)
+        class_to_new_label = {old_label: new_label for new_label, old_label in enumerate(subset_tiny_img)}
+        print('>>>>> Map class to new label', class_to_new_label)
+        real_train = TinyImagenet(split_tiny_imagenet(ds_train, subset_tiny_img, class_to_new_label), transform=transform_train)
+        real_test = TinyImagenet(split_tiny_imagenet(ds_test, subset_tiny_img, class_to_new_label), transform=transform_test)
         num_classes = len(subset_tiny_img)
         print('>>>>>> Num trained class', num_classes)
         real_loader = torch.utils.data.DataLoader(
             real_train, batch_size=args.real_bs, shuffle=True, num_workers=4, pin_memory=True)
         real_testloader = torch.utils.data.DataLoader(
             real_test, batch_size=100, shuffle=False, num_workers=4)
-       
-    else:
-        x_train, y_train, x_test, y_test = get_dataset(
-            dataset_config, return_raw=True, resolution=resolution, train_only=False)
-
-        num_classes = dataset_config.num_classes
-        #group_size = args.group_size
-        data_size = x_train.shape[0]
-        if (args.syn_data_dir != ''):
-            data_size = args.num_data
-        # group_num = data_size // group_size if data_size % group_size == 0 else data_size // group_size + 1
-        #group_ids = np.random.choice(
-        #    list(range(group_num)), min(args.num_data // group_size, group_num), replace=False).tolist()
-        #print('Number of group', group_num)
-        #print('>> Group Number', len(group_ids), 'Group IDs: ', group_ids)
-
-        x_list = []
-        y_list = []
-        # for group_id in group_ids:
-        #     x_list.append(x_train[group_id*group_size:(group_id+1)*group_size])
-        #     y_list.append(y_train[group_id*group_size:(group_id+1)*group_size])
-        # x_train = np.concatenate(x_list, axis=0)
-        # y_train = np.concatenate(y_list, axis=0)
-
-        real_train = RealDataset(x_train, y_train, transform=transform_train)
-        real_test = RealDataset(x_test, y_test, transform=transform_test)
-        real_loader = torch.utils.data.DataLoader(
-            real_train, batch_size=args.real_bs, shuffle=True, num_workers=4, pin_memory=True)
-        real_testloader = torch.utils.data.DataLoader(
-            real_test, batch_size=100, shuffle=False, num_workers=4)
-
+      
     if args.syn_data_dir != '':
-        print("Synthetic pattern: ", args.syn_pattern)
-        def is_valid_file(path):
-            folder = path.split('/')[-2]
-            # group_id = int(path.split('/')[-1][5:7])
-            # check if folder matches the pattern
-            if re.fullmatch(pattern=args.syn_pattern, string=folder) is not None:
-                # if group_id in group_ids:
-                #     return True
-                return True
-            else:
-                return False
-            # if group_id in group_ids:
-            #     return True
         print(args.syn_data_dir)
-        syn_train = ImageFolder(
-            args.syn_data_dir, is_valid_file=is_valid_file, transform=transform_train)
+        syn_train = ImageFolder(args.syn_data_dir, transform=transform_train)
+        # syn_train = ImageFolder(args.syn_data_dir)
+        print(syn_train.class_to_idx)
+        class_to_idx = {f'class_{x:04d}':class_to_new_label[x] for x in class_to_new_label.keys()}
+        # ds_test = load_dataset('Maysee/tiny-imagenet', split='valid')
+        # valid_ds = split_tiny_imagenet(ds_test, subset_tiny_img, class_to_new_label)
+        print(class_to_new_label)
         print(f'==> Synthetic Training data loaded.. Size: {len(syn_train)}')
+        
+        # check if label syn_train match label real_test by printing image with same labels in syn_train and real_test
+        # img_train = {}
+        # img_test = {}
+        # for id in range(0, len(syn_train), 500):
+        #     if  (not syn_train[id][1] in img_train):
+        #         img_train[syn_train[id][1]] = syn_train[id][0]
+        # for item in valid_ds:
+        #     if (not item['label'] in img_test):
+        #         img_test[item['label']] = item['image']
+       
+        # for key, value in img_train.items():
+        #     value.save(f'test/{key}_synthetic.png')
+        # for key, value in img_test.items():
+        #     value.save(f'test/{key}_real.png')
+        # print('done')
+        # exit()
+
         syn_loader = torch.utils.data.DataLoader(
-            syn_train, batch_size=args.syn_bs, shuffle=True, num_workers=4, pin_memory=True)
+            syn_train, batch_size=args.syn_bs, shuffle=True, num_workers=4)
         train_dataset = syn_train
-        # if args.real_bs == 0:
-            # As we loop over the real loader, we need to replace it with the synthetic loader
         real_train = syn_train
         real_loader = syn_loader
         syn_train = None
@@ -396,8 +342,6 @@ def main():
         data_name = f'real_data{len(train_dataset)}'
 
     opt_name = f'{args.model}_opt{args.optimizer}_lr{args.lr}_wd{args.weight_decay}'
-    # output_dir = f'{args.output}/{args.dataset_name}/{data_name}/{opt_name}/seed{args.seed}'
-    #output_dir = f'{args.output}/{args.dataset_name}/{data_name}/{opt_name}_synbs{args.syn_bs}_realbs{args.real_bs}/seed{args.seed}'
     output_dir = f'{args.output}/{args.dataset_name}/{data_name}/{opt_name}_realbs{args.real_bs}/seed{args.seed}'
     args.data_name = data_name
     args.opt_name = opt_name
@@ -417,6 +361,8 @@ def main():
         start_step = checkpoint['step'] + 1
         print('==> Resuming from checkpoint. start_step: ',
               start_step, 'best_acc: ', best_acc)
+        print(f'Running eval at step {start_step}')
+        test_loss, acc = test(net, real_testloader, criterion, device)
     except:
         start_step = 0
         best_acc = 0  # best test accuracy

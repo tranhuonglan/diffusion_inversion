@@ -9,8 +9,21 @@ Reference:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.models import resnet18, ResNet18_Weights
 
+class PretrainedResNet18(nn.Module):
+    def __init__(self):
+        super().__init__()
+        weights = ResNet18_Weights.DEFAULT
+        self.resnet18 = resnet18(weights=weights, progress=False).eval()
+        self.transforms = weights.transforms()
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.transforms(x)
+        y_pred = self.resnet18(x)
+        return y_pred
+        return y_pred.argmax(dim=1)
+        
 class BasicBlock(nn.Module):
     expansion = 1
 
@@ -83,6 +96,9 @@ class ResNet(nn.Module):
         elif resolution == 28:
             self.conv1 = nn.Conv2d(3, 64, kernel_size=3,
                                 stride=1, padding=3, bias=False)
+        elif resolution == 64: 
+            self.conv1 = nn.Conv2d(3, 64, kernel_size=3, 
+                                stride=1, padding=1, bias=False)
         elif resolution == 96:
             self.conv1 = nn.Conv2d(3, 64, kernel_size=7,
                                 stride=2, padding=3, bias=False)
@@ -141,8 +157,10 @@ def ResNet152(num_classes=10, resolution=32):
 
 
 def test():
-    net = ResNet18()
-    y = net(torch.randn(1, 3, 32, 32))
+    net = PretrainedResNet18()
+    y = net(torch.randn(1, 3, 64, 64))
     print(y.size())
 
+if __name__=='__main__':
+    test()
 # test()

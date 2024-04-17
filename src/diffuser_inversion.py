@@ -21,8 +21,8 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel
-from diffusers.optimization import get_scheduler
-from diffusers.utils.import_utils import is_xformers_available
+from diffusers.optimization import get_scheduler 
+# from diffusers.utils.import_utils import is_xformers_available
 from huggingface_hub import HfFolder, Repository, whoami
 
 # TODO: remove and import from diffusers.utils when the new version of diffusers is released
@@ -41,7 +41,7 @@ import tensorflow as tf
 sys.path.append('.')  # NOQA
 from pipeline_emb import EmbPipeline, EmbModel
 from dataset import get_dataset
-tf.config.experimental.set_visible_devices([], "GPU")
+# tf.config.experimental.set_visible_devices(["5"], "GPU")
 
 
 def D(**kwargs):
@@ -534,7 +534,7 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         log_with=args.report_to,
-        logging_dir=logging_dir,
+        project_dir=logging_dir,
     )
 
     # Make one log on every process with the configuration for debugging.
@@ -616,12 +616,12 @@ def main():
         # text_encoder.gradient_checkpointing_enable()
         unet.enable_gradient_checkpointing()
 
-    if args.enable_xformers_memory_efficient_attention:
-        if is_xformers_available():
-            unet.enable_xformers_memory_efficient_attention()
-        else:
-            raise ValueError(
-                "xformers is not available. Make sure it is installed correctly")
+    # if args.enable_xformers_memory_efficient_attention:
+    #     if is_xformers_available():
+    #         unet.enable_xformers_memory_efficient_attention()
+    #     else:
+    #         raise ValueError(
+    #             "xformers is not available. Make sure it is installed correctly")
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices

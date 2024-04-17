@@ -5,7 +5,7 @@ import wandb
 import random
 import time
 from absl import logging
-
+from tqdm import tqdm
 import sys
 import ml_collections
 import tensorflow as tf
@@ -34,7 +34,7 @@ from datasets import load_dataset
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from dataset import get_dataset  # NOQA
 from models import ResNet18, ResNet50, VGG, MobileNetV2, EfficientNetB0, ShuffleNetV2  # NOQA
-
+import pandas as pd
 
 PIL_INTERPOLATION = {
     "linear": PIL.Image.Resampling.BILINEAR,
@@ -106,7 +106,7 @@ parser.add_argument('--syn-data-dir', default='', type=str, metavar='DIR',
                     help='path to synthetic dataset (root dir)')
 parser.add_argument('--syn-pattern', default='', type=str, metavar='NAME',
                     help='regular expression for the wanted synthetic dataset')
-parser.add_argument('--specific-class', default=None, type=list, metavar='NAME',
+parser.add_argument('--specific-class', default=None, type=str, metavar='NAME',
                     help='regular expression for the wanted synthetic dataset')
 
 parser.add_argument('--output', default='', type=str, metavar='PATH',
@@ -125,7 +125,7 @@ parser.add_argument('--weight-decay', default=5e-4,
                     type=float, help='learning rate')
 parser.add_argument('--num-steps', default=50000,
                     type=int, help='num training steps')
-parser.add_argument('--num-data', default=1000,
+parser.add_argument('--num-data', default=10000,
                     type=int, help='num of training data')
 parser.add_argument('--warmup-steps', default=1000,
                     type=int, help='num training steps')
@@ -135,7 +135,7 @@ parser.add_argument('--seed', default=0,
                     type=int, help='random seed')
 parser.add_argument('--log-wandb', action='store_true', default=False,
                     help='log training and validation metrics to wandb')
-
+parser.add_argument('--select_mode', default='none', help='options: low, high, none', choices=['low','high','none'])
 
 def get_lr(optimizer):
     for param_group in optimizer.param_groups:
@@ -179,17 +179,32 @@ def test(net, testloader, criterion, device):
     return test_loss/total, 100.*correct/total
 
 
-def split_tiny_imagenet(ds, selected_class):
-    class_to_new_label = {old_label: new_label for new_label, old_label in enumerate(selected_class)}
-    print('>>>>> Map class to new label', class_to_new_label)
+def split_tiny_imagenet(ds, selected_class, class_to_new_label):
     ds = ds.filter(lambda x: x['label'] in selected_class)
-
     def map_labels(sample):
         sample['label'] = class_to_new_label[sample['label']]
         return sample
 
     ds = ds.map(map_labels)
     return ds
+
+
+def predict_probs(dataloader, model, num_data_class, ascending=False):
+    all_probs = []
+    all_labels = []
+    with torch.no_grad():
+        for images, labels in tqdm(dataloader):
+            outputs = model(images)
+            probs = torch.nn.functional.softmax(outputs, dim=1)
+            all_probs.extend(probs[torch.arange(probs.size(0)),  labels].cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    df = pd.DataFrame({'probability': all_probs, 'label': all_labels, 'index': np.arange(len(all_probs))})
+    num_data_class = num_data_class
+    
+    top_indices = df.groupby('label').apply(
+    lambda x: x.sort_values(by='probability', ascending=ascending).head(num_data_class))['index'].tolist()
+    return top_indices
     
 def main():
     args = parser.parse_args()
@@ -299,65 +314,72 @@ def main():
         from classes import i2d
         ds_train = load_dataset('Maysee/tiny-imagenet', split='train')
         ds_test = load_dataset('Maysee/tiny-imagenet', split='valid')
-        real_train = TinyImagenet(split_tiny_imagenet(ds_train, subset_tiny_img), transform=transform_train)
-        real_test = TinyImagenet(split_tiny_imagenet(ds_test, subset_tiny_img), transform=transform_test)
-        num_classes = len(subset_tiny_img)
+        class_to_new_label = {}
+        if args.specific_class is None:
+            subset = sorted(subset_tiny_img)
+            class_to_new_label = {old_label: new_label for new_label, old_label in enumerate(subset)}
+        else:
+            # print(">>>> specific class", args.specific_class)
+            subset = [int(num) for num in args.specific_class.split(',')]
+            subset = sorted(subset)
+            class_to_new_label = {old_label: new_label for new_label, old_label in enumerate(subset)}
+        print('>>>>> Map class to new label', class_to_new_label)
+        real_train = TinyImagenet(split_tiny_imagenet(ds_train, subset, class_to_new_label), transform=transform_train)
+        real_test = TinyImagenet(split_tiny_imagenet(ds_test, subset, class_to_new_label), transform=transform_test)
+        num_classes = len(subset)
         print('>>>>>> Num trained class', num_classes)
         real_loader = torch.utils.data.DataLoader(
             real_train, batch_size=args.real_bs, shuffle=True, num_workers=4, pin_memory=True)
         real_testloader = torch.utils.data.DataLoader(
             real_test, batch_size=100, shuffle=False, num_workers=4)
-       
-    else:
-        x_train, y_train, x_test, y_test = get_dataset(
-            dataset_config, return_raw=True, resolution=resolution, train_only=False)
-
-        num_classes = dataset_config.num_classes
-        #group_size = args.group_size
-        data_size = x_train.shape[0]
-        if (args.syn_data_dir != ''):
-            data_size = args.num_data
-        # group_num = data_size // group_size if data_size % group_size == 0 else data_size // group_size + 1
-        #group_ids = np.random.choice(
-        #    list(range(group_num)), min(args.num_data // group_size, group_num), replace=False).tolist()
-        #print('Number of group', group_num)
-        #print('>> Group Number', len(group_ids), 'Group IDs: ', group_ids)
-
-        x_list = []
-        y_list = []
-        # for group_id in group_ids:
-        #     x_list.append(x_train[group_id*group_size:(group_id+1)*group_size])
-        #     y_list.append(y_train[group_id*group_size:(group_id+1)*group_size])
-        # x_train = np.concatenate(x_list, axis=0)
-        # y_train = np.concatenate(y_list, axis=0)
-
-        real_train = RealDataset(x_train, y_train, transform=transform_train)
-        real_test = RealDataset(x_test, y_test, transform=transform_test)
-        real_loader = torch.utils.data.DataLoader(
-            real_train, batch_size=args.real_bs, shuffle=True, num_workers=4, pin_memory=True)
-        real_testloader = torch.utils.data.DataLoader(
-            real_test, batch_size=100, shuffle=False, num_workers=4)
-
     if args.syn_data_dir != '':
         print("Synthetic pattern: ", args.syn_pattern)
-        def is_valid_file(path):
-            folder = path.split('/')[-2]
-            # group_id = int(path.split('/')[-1][5:7])
-            # check if folder matches the pattern
-            if re.fullmatch(pattern=args.syn_pattern, string=folder) is not None:
-                # if group_id in group_ids:
-                #     return True
-                return True
-            else:
-                return False
-            # if group_id in group_ids:
-            #     return True
         print(args.syn_data_dir)
-        syn_train = ImageFolder(
-            args.syn_data_dir, is_valid_file=is_valid_file, transform=transform_train)
+        # file_paths = ['/home/docker_user/lan/diffusion_inversion/results/tiny-imagenet-syn-baseline', 
+        #              '/home/docker_user/lan/diffusion_inversion/results/tiny-imagenet-syn-baseline-group2']
+        # X = [ImageFolder(file_path, transform=transform_train) for file_path in file_paths]
+        # X = [ImageFolder(file_path) for file_path in file_paths]
+
+        # syn_train = torch.utils.data.ConcatDataset(X)
+
+        syn_train = ImageFolder(args.syn_data_dir, transform=transform_train)
+        
+        # ds_test = split_tiny_imagenet(load_dataset('Maysee/tiny-imagenet', split='valid'), subset_tiny_img, class_to_new_label)
+        # import matplotlib.pyplot as plt
+        # for id in range(0, 10000, 500):
+        #     syn_train[id][0].save(f'test/{syn_train[id][1]}_syn.png')
+        #     syn_train[id+10000][0].save(f'test/{syn_train[id+10000][1]}_syn_2.png')
+        # for id in range(0, 1000, 50): 
+        #     ds_test[id]['image'].save( f'test/{ds_test[id]["label"]}_real.png')
+
         print(f'==> Synthetic Training data loaded.. Size: {len(syn_train)}')
         syn_loader = torch.utils.data.DataLoader(
             syn_train, batch_size=args.syn_bs, shuffle=True, num_workers=4, pin_memory=True)
+    
+        num_data_class = len(syn_train)//num_classes
+        print("Number of data per class", num_data_class)
+        path = '/home/docker_user/lan/diffusion_inversion/arch/tiny-imagenet-syn-baseline/tiny-imagenet/baseline/resnet18_optsgd_lr0.01_wd0.0005_realbs128/seed42/best_ckpt.pth'
+    
+        # Assuming class_idx is the class you're interested in
+        if (args.select_mode != "none"):
+            checkpoint = torch.load(path)
+            model = ResNet18(num_classes=num_classes, resolution=resolution)
+            model.load_state_dict(checkpoint['net'])
+            top_indices = []
+
+            if (args.select_mode == "low"):
+                print('>>> Select top lowest probability')
+                top_indices = predict_probs(dataloader=syn_loader, model=model, num_data_class=num_data_class, ascending=True)
+            elif (args.select_mode == "high"):
+                print('>>> Select top highest probability')
+                top_indices = predict_probs(dataloader=syn_loader, model=model, num_data_class=num_data_class, ascending=False)
+            syn_train = torch.utils.data.Subset(syn_train, top_indices)
+            print(len(top_indices))
+            print(">>>> Len DATASET after filter: ", len(syn_train))
+   
+        syn_loader = torch.utils.data.DataLoader(
+            syn_train, batch_size=args.syn_bs, shuffle=True, num_workers=4, pin_memory=True)
+        
         train_dataset = syn_train
         # if args.real_bs == 0:
             # As we loop over the real loader, we need to replace it with the synthetic loader
@@ -387,7 +409,7 @@ def main():
         torch.optim.lr_scheduler.LinearLR(
             optimizer, start_factor=0.001, total_iters=args.warmup_steps),
         torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_steps, eta_min=args.lr * 0.001)])
-
+    
     if args.syn_data_dir != "":
         data_name = f'{args.syn_pattern}_data{len(train_dataset)}'
     elif args.dataset_name == 'tiny-imagenet':
@@ -396,7 +418,7 @@ def main():
         data_name = f'real_data{len(train_dataset)}'
 
     opt_name = f'{args.model}_opt{args.optimizer}_lr{args.lr}_wd{args.weight_decay}'
-    # output_dir = f'{args.output}/{args.dataset_name}/{data_name}/{opt_name}/seed{args.seed}'
+    #output_dir = f'{args.output}/{args.dataset_name}/{data_name}/{opt_name}/seed{args.seed}'
     #output_dir = f'{args.output}/{args.dataset_name}/{data_name}/{opt_name}_synbs{args.syn_bs}_realbs{args.real_bs}/seed{args.seed}'
     output_dir = f'{args.output}/{args.dataset_name}/{data_name}/{opt_name}_realbs{args.real_bs}/seed{args.seed}'
     args.data_name = data_name

@@ -1,68 +1,3 @@
-# Copyright 2022 The HuggingFace Team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-import inspect
-from typing import Callable, List, Optional, Union
-from dataclasses import dataclass
-
-import torch
-import torch.nn as nn
-import numpy as np
-
-from diffusers.models.modeling_utils import is_accelerate_available
-from packaging import version
-from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
-
-from diffusers.configuration_utils import FrozenDict, ConfigMixin, register_to_config
-from diffusers.models import AutoencoderKL, UNet2DConditionModel
-from diffusers.models.modeling_utils import ModelMixin
-from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.schedulers import (
-    DDIMScheduler,
-    DPMSolverMultistepScheduler,
-    EulerAncestralDiscreteScheduler,
-    EulerDiscreteScheduler,
-    LMSDiscreteScheduler,
-    PNDMScheduler,
-)
-from diffusers.utils import deprecate, logging
-from diffusers.pipelines.stable_diffusion import StableDiffusionSafetyChecker, StableDiffusionPipelineOutput
-import torchvision.transforms as transforms
-from models.resnet import ResNet18
-
-logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
-
-import PIL
-TORCH_INTERPOLATION = {"linear": transforms.InterpolationMode.BILINEAR,
-                        "bilinear": transforms.InterpolationMode.BILINEAR,
-                        "bicubic": transforms.InterpolationMode.BICUBIC,
-                        "lanczos": transforms.InterpolationMode.LANCZOS,
-                        "nearest": transforms.InterpolationMode.NEAREST}
-
-EXAMPLE_DOC_STRING = """
-    Examples:
-        ```py
-        >>> import torch
-        >>> from diffusers import StableDiffusionPipeline
-
-        >>> pipe = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", torch_dtype=torch.float16)
-        >>> pipe = pipe.to("cuda")
-
-        >>> prompt = "a photo of an astronaut riding a horse on mars"
-        >>> image = pipe(prompt).images[0]
-        ```
-"""
 
 class EmbModel(ModelMixin, ConfigMixin):
     @register_to_config
@@ -116,7 +51,7 @@ class EmbPipeline(DiffusionPipeline):
 
     def __init__(
         self,
-        emb: EmbModel,
+        
         vae: AutoencoderKL,
         text_encoder: CLIPTextModel,
         tokenizer: CLIPTokenizer,
@@ -133,6 +68,7 @@ class EmbPipeline(DiffusionPipeline):
         feature_extractor: CLIPFeatureExtractor,
         requires_safety_checker: bool = True,
         avg_uncond_embeddings: bool = True,
+        emb: EmbModel = None
     ):
         super().__init__()
 
@@ -295,9 +231,8 @@ class EmbPipeline(DiffusionPipeline):
                 The prompt or prompts not to guide the image generation. Ignored when not using guidance (i.e., ignored
                 if `guidance_scale` is less than `1`).
         """
-        batch_size = 1 if len(prompt.shape) == 1 else prompt.shape[0]
-        text_embeddings = self.emb(prompt)
-
+        batch_size = 1 # if len(prompt.shape) == 1 else prompt.shape[0]
+        text_embeddings = self.tokenizer(prompt)
         # duplicate text embeddings for each generation per prompt, using mps friendly method
         bs_embed, seq_len, _ = text_embeddings.shape
         text_embeddings = text_embeddings.repeat(1, num_images_per_prompt, 1)
@@ -320,7 +255,6 @@ class EmbPipeline(DiffusionPipeline):
                     uncond_input = self.tokenizer(
                         [""],
                         padding="max_length",
-                        max_length=self.emb.num_tokens,
                         truncation=True,
                         return_tensors="pt",
                     )
@@ -350,7 +284,6 @@ class EmbPipeline(DiffusionPipeline):
             # to avoid doing two forward passes
 
             text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
-
         return text_embeddings
 
     def run_safety_checker(self, image, device, dtype):
@@ -551,7 +484,7 @@ class EmbPipeline(DiffusionPipeline):
 
         # 2. Define call parameters
         # batch_size = 1 if isinstance(prompt, str) else len(prompt)
-        batch_size = 1 if len(prompt.shape) == 1 else prompt.shape[0]
+        batch_size = 1 
         device = self._execution_device
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
@@ -615,10 +548,11 @@ class EmbPipeline(DiffusionPipeline):
                 if (t_step > 0) and (i == 1):
                     net = ResNet18().to(device)
                     try:
-                        load_dir="arch/cifar10/real_ngroup50_ndata5000/resnet18_optsgd_lr0.1_wd0.0005_synbs128_realbs128/seed42"
-                        checkpoint = torch.load(f'{load_dir}/best_ckpt.pth')
-                        net.load_state_dict(checkpoint['net'])
-                        print('==> Loading Pretrained model from checkpoint')
+                        pass
+                        # load_dir="arch/cifar10/real_ngroup50_ndata5000/resnet18_optsgd_lr0.1_wd0.0005_synbs128_realbs128/seed42"
+                        # checkpoint = torch.load(f'{load_dir}/best_ckpt.pth')
+                        # net.load_state_dict(checkpoint['net'])
+                        # print('==> Loading Pretrained model from checkpoint')
                     except:
                         print("Pretrained network does not exist!")
                         exit()
@@ -658,8 +592,6 @@ class EmbPipeline(DiffusionPipeline):
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + guidance_scale * \
                         (noise_pred_text - noise_pred_uncond)
-                    if latent_grad is not None:
-                        noise_pred = noise_pred + 0.1 * latent_grad[0]
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(
@@ -683,6 +615,7 @@ class EmbPipeline(DiffusionPipeline):
 
         if not return_dict:
             return (image, has_nsfw_concept)
-
+        plt.imshow(image)
+        plt.savefig('testing_dog.png')
+        plt.close()
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
-

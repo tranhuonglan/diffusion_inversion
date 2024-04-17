@@ -109,7 +109,7 @@ class CIFAR102:
 
         # Data loading code
         kwargs = {"num_workers": num_workers, "pin_memory": True} if use_cuda else {}
-
+        
         self.test_dataset = BasicVisionDataset(
             images=test_data_images, targets=torch.Tensor(test_data_labels).long(),
             transform=preprocess,
